@@ -18,6 +18,21 @@ MULTI_VOYAGE_PREMIUM = 0.010  # illustrative, slightly better premium for commit
 MULTI_VOYAGE_COUNT = 3  # illustrative number of voyages in the short-term multi-voyage tier
 UTILIZATION = 0.90  # sensible default cargo tonnage as a share of vessel DWT capacity (used only to seed the UI's default cargo quantity)
 
+# Illustrative economies-of-scale adjustment: larger vessels spread fixed
+# voyage/port costs over more cargo, so $/mt cost decreases with vessel size.
+# This is a documented placeholder assumption, NOT a live per-class market
+# rate -- our dataset only carries one route-level spot rate. Magnitudes are
+# indicative, not sourced from a specific index. Used ONLY by
+# compare_vessel_costs() below, for the vessel-comparison chart -- it does
+# not touch cost_comparison() (the main Recommendation section), the
+# backtest, or port feasibility.
+VESSEL_CLASS_COST_DISCOUNT = {
+    "Handysize": 0.00,
+    "Supramax": 0.03,
+    "Panamax": 0.06,
+    "Capesize": 0.10,
+}
+
 
 def score_decision(forecast: dict, risk: dict) -> tuple[str, list[str]]:
     reasons = []
@@ -113,12 +128,15 @@ def compare_vessel_costs(port: str, current_rate: float, cargo_quantity_mt: floa
     """Cost/feasibility comparison across every vessel class for a fixed
     cargo requirement (not just the scenario's preset vessel). Uses the
     same current_rate and CONTRACT_PREMIUM already computed elsewhere --
-    no new rate is fetched or estimated. Because the underlying data only
-    carries one route-level spot rate (not a rate per vessel class), the
-    $/mt cost is the same for every feasible vessel here; what actually
-    differs between vessel classes is feasibility and utilization, so the
-    "cost-efficient choice" breaks ties on the best (highest) utilization
-    among the feasible, lowest-cost vessels."""
+    no new rate is fetched or estimated. The underlying data only carries
+    one route-level spot rate (not a rate per vessel class), so each
+    vessel's rate is adjusted by the illustrative VESSEL_CLASS_COST_DISCOUNT
+    above (larger vessels assumed cheaper per mt) -- a documented
+    placeholder, not real per-class market data. What differs between
+    vessel classes here is therefore this illustrative discount, plus
+    feasibility and utilization; the "cost-efficient choice" breaks any
+    remaining cost ties on the best (highest) utilization among the
+    feasible, lowest-cost vessels."""
     effective_rate = current_rate * (1 + CONTRACT_PREMIUM)
 
     rows = []
@@ -126,7 +144,8 @@ def compare_vessel_costs(port: str, current_rate: float, cargo_quantity_mt: floa
         checks = check_feasibility(vessel_class, port)
         feasible = all(c["status"] != "fail" for c in checks)
         utilization = min(cargo_quantity_mt / spec["dwt_max"], 1.0)
-        estimated_cost = effective_rate * cargo_quantity_mt
+        adjusted_rate = effective_rate * (1 - VESSEL_CLASS_COST_DISCOUNT[vessel_class])
+        estimated_cost = adjusted_rate * cargo_quantity_mt
 
         rows.append({
             "vessel_class": vessel_class,

@@ -106,19 +106,18 @@ freight-rate data — see "Data" above for how a real CSV can override it.
 - Holdout MAE/RMSE for both the naive baseline and the statistical forecast
   (same train/test split used for the P10/P90 band, computed independently
   so it can never change the forecast, band, risk score, or backtest numbers).
-- The cost-efficiency table across all four vessel classes (not just the
-  selected vessel): feasibility comes from the same `feasibility.py`
+- The cost-efficiency table/chart across all four vessel classes (not just
+  the selected vessel): feasibility comes from the same `feasibility.py`
   checks used elsewhere, utilization is cargo quantity ÷ vessel DWT
   (capped at 100%), and cost uses the same current rate and contract premium
-  as the Recommendation section. Because the dataset carries one route-level
-  spot rate rather than a rate per vessel class, the $/mt cost is genuinely
-  identical across feasible vessels here — the "cost-efficient choice" ties on
-  cost and is decided by the best (highest) utilization among the cheapest,
-  feasible options, which the app states explicitly rather than implying a
-  cost difference that isn't there. When no vessel class is feasible at the
-  selected port (this genuinely happens, e.g. most vessel classes at the
-  shallow-draft Haldia/Sagar-Sandheads ports), the app says so instead of
-  forcing a choice.
+  as the Recommendation section, adjusted per vessel class by the
+  illustrative economies-of-scale discount described below (the dataset
+  itself only carries one route-level spot rate, not a rate per vessel
+  class). The "cost-efficient choice" is the lowest-cost feasible vessel,
+  ties broken by the best (highest) utilization. When no vessel class is
+  feasible at the selected port (this genuinely happens, e.g. most vessel
+  classes at the shallow-draft Haldia/Sagar-Sandheads ports), the app says
+  so instead of forcing a choice.
 
 **Hardcoded / manually set (illustrative, not fetched or surveyed):**
 - Vessel-class specs (draft/LOA/beam/DWT for Handysize/Supramax/Panamax/Capesize)
@@ -130,6 +129,38 @@ freight-rate data — see "Data" above for how a real CSV can override it.
 - The contract premium (1.5% for the medium-term single contract, 1.0% for
   the short-term multi-voyage tier) used in the cost comparisons are
   simplifying assumptions, not derived from real charter-party terms.
+
+### Vessel-class cost-discount assumption
+
+The vessel-comparison chart ("Cost efficiency across feasible vessels") used
+to show an identical cost for every feasible vessel class, because the
+dataset carries one route-level spot rate rather than a rate per vessel
+class — a flat, uninformative chart. To make the comparison meaningful,
+`recommendation.py` now applies a documented, illustrative
+**economies-of-scale discount** per vessel class before computing that
+chart's cost:
+
+```python
+VESSEL_CLASS_COST_DISCOUNT = {
+    "Handysize": 0.00,
+    "Supramax": 0.03,
+    "Panamax": 0.06,
+    "Capesize": 0.10,
+}
+```
+
+**What it is:** a placeholder assumption that larger vessels spread fixed
+voyage/port costs over more cargo, so their effective $/mt cost is lower.
+**Why it exists:** we have no live source for real per-vessel-class freight
+differentials on a given route — only one observed rate per route/vessel
+combination — so without this adjustment the comparison chart would be flat
+and uninformative regardless of vessel choice. **It is not real market
+data** — the magnitudes are indicative, not sourced from a specific freight
+index, and should be replaced with real vessel-class rate data (or removed)
+if/when that becomes available. It is scoped narrowly: it only affects
+`compare_vessel_costs()` (the vessel-comparison chart) and does **not**
+touch `cost_comparison()` (the main Recommendation section's three-way cost
+comparison), the backtest, or port feasibility checks.
 
 **Deliberately out of scope for tonight** (per the brief): no LSTM/XGBoost/
 TimesFM/Chronos-2 model benchmarking, no database, no multi-user auth, no
