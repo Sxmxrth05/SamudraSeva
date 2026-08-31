@@ -28,7 +28,7 @@ from recommendation import score_decision, CONTRACT_PREMIUM
 
 
 def run_backtest(series: pd.Series, horizon: int, congestion_level: str, availability_level: str,
-                  n_decision_points: int = 6, min_history_days: int = 200) -> dict:
+                  n_decision_points: int = 18, min_history_days: int = 200) -> dict:
     n = len(series)
     latest_index = n - horizon - 1  # need `horizon` real future days after this point to score the outcome
     earliest_index = min_history_days
