@@ -216,9 +216,10 @@ with st.expander("Show exact vessel comparison figures"):
     st.dataframe(pd.DataFrame(cost_rows), use_container_width=True, hide_index=True)
 
 st.caption("Estimated cost = (current rate + contract premium) x cargo quantity, using the same current rate and "
-           "premium as the Recommendation section below -- this dataset carries one route-level spot rate, not a "
-           "rate per vessel class, so $/mt cost is the same across feasible vessels here; feasibility and "
-           "utilization are what actually differ between them.")
+           "premium as the Recommendation section below. Larger vessels get an illustrative economies-of-scale "
+           "discount (spreading fixed voyage/port costs over more cargo) since this dataset carries one "
+           "route-level rate rather than a rate per vessel class. Discount magnitudes are a documented "
+           "placeholder, not live market data -- see README.")
 
 # ---------------------------------------------------------------- Risk
 st.subheader("Risk assessment")
