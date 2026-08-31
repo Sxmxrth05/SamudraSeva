@@ -3,17 +3,20 @@ Recommendation module.
 
 An explicit, transparent point-scoring rule over forecast direction,
 probability of increase, and risk level decides Charter Now vs
-Wait/Monitor -- never a hardcoded verdict. A spot-only vs multi-voyage
-contract cost comparison is computed from the forecast, and every decision
-ships with the list of reasons that drove it.
+Wait/Monitor -- never a hardcoded verdict. A spot-only vs short-term
+multi-voyage vs medium-term single-contract cost comparison is computed
+from the forecast, and every decision ships with the list of reasons that
+drove it.
 """
 
 import numpy as np
 
 from feasibility import VESSEL_SPECS, check_feasibility
 
-CONTRACT_PREMIUM = 0.015  # illustrative premium a charterer pays to lock in a fixed multi-voyage rate
-UTILIZATION = 0.90  # assumed cargo tonnage as a share of vessel DWT capacity
+CONTRACT_PREMIUM = 0.015  # illustrative premium for a single fixed-rate contract (one lock, no multi-voyage commitment)
+MULTI_VOYAGE_PREMIUM = 0.010  # illustrative, slightly better premium for committing to a short-term multi-voyage deal
+MULTI_VOYAGE_COUNT = 3  # illustrative number of voyages in the short-term multi-voyage tier
+UTILIZATION = 0.90  # sensible default cargo tonnage as a share of vessel DWT capacity (used only to seed the UI's default cargo quantity)
 
 
 def score_decision(forecast: dict, risk: dict) -> tuple[str, list[str]]:
@@ -52,30 +55,49 @@ def score_decision(forecast: dict, risk: dict) -> tuple[str, list[str]]:
     return decision, reasons
 
 
-def cost_comparison(forecast: dict, vessel_class: str, dwt_max: float) -> dict:
-    tonnage = dwt_max * UTILIZATION
+def cost_comparison(forecast: dict, vessel_class: str, dwt_max: float, cargo_quantity_mt: float) -> dict:
+    """Three-way cost comparison for the requirement's actual cargo
+    quantity: spot-only (avg forecast rate), a medium-term single fixed
+    contract (CONTRACT_PREMIUM), and a short-term multi-voyage deal
+    (MULTI_VOYAGE_PREMIUM, MULTI_VOYAGE_COUNT voyages) -- same rate-times-
+    tonnage formula for all three, just a different rate/premium per tier."""
+    tonnage = cargo_quantity_mt
+    utilization = min(cargo_quantity_mt / dwt_max, 1.0)
+
     avg_spot_rate = float(np.mean(forecast["point"]))
     contract_rate = forecast["current_rate"] * (1 + CONTRACT_PREMIUM)
+    multi_voyage_rate = forecast["current_rate"] * (1 + MULTI_VOYAGE_PREMIUM)
 
     spot_cost = avg_spot_rate * tonnage
     contract_cost = contract_rate * tonnage
-    savings = spot_cost - contract_cost
+    multi_voyage_cost = multi_voyage_rate * tonnage
 
     return {
         "tonnage_mt": tonnage,
+        "utilization": utilization,
         "avg_spot_rate": avg_spot_rate,
         "contract_rate": contract_rate,
+        "multi_voyage_rate": multi_voyage_rate,
+        "multi_voyage_count": MULTI_VOYAGE_COUNT,
         "spot_cost_usd": spot_cost,
         "contract_cost_usd": contract_cost,
-        "savings_usd": savings,
+        "multi_voyage_cost_usd": multi_voyage_cost,
+        "savings_usd": spot_cost - contract_cost,
+        "multi_voyage_savings_usd": spot_cost - multi_voyage_cost,
     }
 
 
-def build_recommendation(forecast: dict, risk: dict, vessel_class: str, dwt_max: float) -> dict:
+def build_recommendation(forecast: dict, risk: dict, vessel_class: str, dwt_max: float,
+                          cargo_quantity_mt: float) -> dict:
     decision, reasons = score_decision(forecast, risk)
-    costs = cost_comparison(forecast, vessel_class, dwt_max)
+    costs = cost_comparison(forecast, vessel_class, dwt_max, cargo_quantity_mt)
 
-    strategy = "Multi-voyage / COA contract" if costs["contract_cost_usd"] < costs["spot_cost_usd"] else "Spot market"
+    strategy_costs = {
+        "Spot market": costs["spot_cost_usd"],
+        f"Short-term multi-voyage ({costs['multi_voyage_count']} voyages)": costs["multi_voyage_cost_usd"],
+        "Medium-term (single fixed contract)": costs["contract_cost_usd"],
+    }
+    strategy = min(strategy_costs, key=strategy_costs.get)
 
     return {
         "decision": decision,

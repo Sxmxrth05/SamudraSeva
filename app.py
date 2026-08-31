@@ -2,9 +2,9 @@
 Freight forecasting & vessel chartering decision support -- overnight MVP.
 
 SIH 2026, Problem Statement 26006. Single-page Streamlit prototype: every
-number on screen is computed live from data/freight_rates.csv (synthetic
-placeholder data if no real file is supplied) -- see README.md for exactly
-what's real computation vs simplified for time.
+number on screen is computed live from a procurement requirement the user
+fills in (origin, destination, vessel class, cargo quantity) -- see
+README.md for exactly what's real computation vs simplified for time.
 """
 
 from pathlib import Path
@@ -14,65 +14,91 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from backtest import run_backtest
-from feasibility import VESSEL_SPECS, check_all_vessel_classes
-from forecasting import build_forecast, get_scenario_series, holdout_errors
+from data.generate_data import generate_synthetic_series
+from feasibility import PORT_LIMITS, VESSEL_SPECS, check_all_vessel_classes
+from forecasting import build_forecast_from_series, holdout_errors
 from recommendation import UTILIZATION, build_recommendation, compare_vessel_costs
 from risk import AVAILABILITY_LEVELS, CONGESTION_LEVELS, compute_risk
 
 DATA_PATH = Path(__file__).parent / "data" / "freight_rates.csv"
 
-SCENARIOS = {
-    "Australia -> Paradip (Supramax, Coal)": {
-        "route": "Australia-Paradip", "vessel_class": "Supramax", "cargo_type": "Coal", "port": "Paradip",
-    },
-    "Indonesia -> Visakhapatnam (Panamax, Coal)": {
-        "route": "Indonesia-Visakhapatnam", "vessel_class": "Panamax", "cargo_type": "Coal", "port": "Visakhapatnam",
-    },
-    "Mozambique -> Dhamra (Handysize, Coal)": {
-        "route": "Mozambique-Dhamra", "vessel_class": "Handysize", "cargo_type": "Coal", "port": "Dhamra",
-    },
-}
+ORIGINS = ["Australia", "United States", "Mozambique", "Russia", "Indonesia"]
+DESTINATIONS = list(PORT_LIMITS.keys())  # Paradip, Visakhapatnam, Gangavaram, Gopalpur, Dhamra, Sagar/Sandheads, Haldia
+VESSEL_CLASSES = list(VESSEL_SPECS.keys())  # Handysize, Supramax, Panamax, Capesize
+CARGO_TYPE = "Coal"  # fixed for this prototype -- out of scope to change tonight
 
 STATUS_BADGE = {"pass": "🟢 Pass", "fail": "🔴 Fail", "unknown": "⚪ Unknown"}
 RISK_COLOR = {"Low": "🟢", "Medium": "🟡", "High": "🔴"}
 
 
 @st.cache_data
-def load_data() -> pd.DataFrame:
-    if not DATA_PATH.exists():
-        from data.generate_data import generate_synthetic_data
-        DATA_PATH.parent.mkdir(exist_ok=True)
-        df = generate_synthetic_data()
-        df.to_csv(DATA_PATH, index=False)
-    else:
-        df = pd.read_csv(DATA_PATH, parse_dates=["date"])
-    return df
+def load_real_data() -> pd.DataFrame | None:
+    """Optional real-data override: if data/freight_rates.csv exists and
+    has rows matching the selected (route, vessel_class, cargo_type), those
+    rows are preferred over synthetic generation. Not required -- the app
+    works fully without this file."""
+    if DATA_PATH.exists():
+        return pd.read_csv(DATA_PATH, parse_dates=["date"])
+    return None
 
 
 @st.cache_data
-def cached_forecast(route, vessel_class, cargo_type, horizon):
-    df = load_data()
-    return build_forecast(df, route, vessel_class, cargo_type, horizon)
+def resolve_series(origin: str, destination: str, vessel_class: str, cargo_type: str):
+    """Resolve the daily rate series for a requirement. Prefers real data
+    (data/freight_rates.csv) when a matching route/vessel/cargo history
+    exists there; otherwise generates a synthetic series deterministically
+    seeded from the route+vessel identifiers (see data/generate_data.py) --
+    so re-selecting the same combination always reproduces the exact same
+    series and every downstream number, even across app restarts. Cached
+    so switching between combinations stays fast."""
+    route = f"{origin}-{destination}"
+    real_df = load_real_data()
+    if real_df is not None:
+        mask = (
+            (real_df["route"] == route)
+            & (real_df["vessel_class"] == vessel_class)
+            & (real_df["cargo_type"] == cargo_type)
+        )
+        sub = real_df.loc[mask]
+        if len(sub) >= 90:
+            series = sub.sort_values("date").set_index("date")["rate_usd_per_mt"]
+            return series, "real data (data/freight_rates.csv)"
+
+    synth = generate_synthetic_series(origin, destination, vessel_class, cargo_type)
+    series = synth.set_index("date")["rate_usd_per_mt"]
+    return series, "synthetic (deterministically seeded from origin + destination + vessel)"
 
 
 @st.cache_data
-def cached_holdout_metrics(route, vessel_class, cargo_type):
-    df = load_data()
-    series = get_scenario_series(df, route, vessel_class, cargo_type)
+def cached_forecast(origin, destination, vessel_class, cargo_type, horizon):
+    series, source = resolve_series(origin, destination, vessel_class, cargo_type)
+    fc = build_forecast_from_series(series, horizon)
+    fc["data_source"] = source
+    return fc
+
+
+@st.cache_data
+def cached_holdout_metrics(origin, destination, vessel_class, cargo_type):
+    series, _ = resolve_series(origin, destination, vessel_class, cargo_type)
     return holdout_errors(series)
 
 
 st.set_page_config(page_title="SAIL Freight Forecasting & Chartering", layout="wide")
 
-df = load_data()
-
-st.title("Freight Forecasting & Vessel Chartering Decision Support")
-st.caption("SIH 2026 - Problem Statement 26006 | Prototype MVP - all figures computed live from data/freight_rates.csv")
+st.title("SamudraSetu")
+st.caption("SIH 2026 - Problem Statement 26006 | Prototype MVP - all figures computed live from the requirement below")
 
 with st.sidebar:
-    st.header("Scenario")
-    scenario_label = st.radio("Route / vessel / cargo", list(SCENARIOS.keys()))
-    scenario = SCENARIOS[scenario_label]
+    st.header("Procurement requirement")
+    origin = st.selectbox("Origin", ORIGINS)
+    destination = st.selectbox("Destination", DESTINATIONS)
+    vessel_class = st.selectbox("Vessel class", VESSEL_CLASSES)
+    default_cargo_qty = VESSEL_SPECS[vessel_class]["dwt_max"] * UTILIZATION
+    cargo_quantity_mt = st.number_input(
+        "Cargo quantity (mt)", min_value=1000.0, max_value=250000.0,
+        value=float(default_cargo_qty), step=1000.0,
+    )
+    st.selectbox("Cargo type", ["Coal"], disabled=True, help="Fixed for this prototype -- out of scope to change tonight.")
 
     horizon = st.radio("Forecast horizon", [7, 30], format_func=lambda h: f"{h} days", horizontal=True)
 
@@ -82,11 +108,11 @@ with st.sidebar:
 
     st.caption("Congestion and availability are manually set here for the demo -- not fetched from a live feed. See README.")
 
-route, vessel_class, cargo_type, port = (
-    scenario["route"], scenario["vessel_class"], scenario["cargo_type"], scenario["port"]
-)
+route = f"{origin}-{destination}"
+port = destination
+cargo_type = CARGO_TYPE
 
-forecast = cached_forecast(route, vessel_class, cargo_type, horizon)
+forecast = cached_forecast(origin, destination, vessel_class, cargo_type, horizon)
 
 # ---------------------------------------------------------------- Forecast
 st.subheader(f"Current rate & {horizon}-day forecast -- {route} ({vessel_class}, {cargo_type})")
@@ -121,9 +147,10 @@ fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10),
                    yaxis_title="USD / mt", legend=dict(orientation="h", yanchor="bottom", y=1.02))
 st.plotly_chart(fig, use_container_width=True)
 st.caption(f"P10-P90 band derived from {forecast['holdout_days_used']}-day holdout residual spread "
-           f"(sigma = ${forecast['residual_sigma']:.2f}/mt), widened with sqrt(t). Naive baseline shown for comparison.")
+           f"(sigma = ${forecast['residual_sigma']:.2f}/mt), widened with sqrt(t). Naive baseline shown for comparison. "
+           f"Data: {forecast['data_source']} -- re-selecting this exact combination always reproduces the same series.")
 
-hm = cached_holdout_metrics(route, vessel_class, cargo_type)
+hm = cached_holdout_metrics(origin, destination, vessel_class, cargo_type)
 mcol1, mcol2 = st.columns(2)
 mcol1.metric(f"Statistical model MAE / RMSE ({hm['holdout_days_used']}d holdout)",
              f"\\${hm['stat_mae']:.2f} / \\${hm['stat_rmse']:.2f}")
@@ -149,28 +176,46 @@ for col, (vc, checks) in zip(feas_cols, feas.items()):
 
 # ---------------------------------------------------------------- Cost efficiency across vessels
 st.subheader("Cost efficiency across feasible vessels")
-default_cargo_qty = VESSEL_SPECS[vessel_class]["dwt_max"] * UTILIZATION
-cargo_quantity_mt = st.number_input(
-    "Cargo requirement (mt) -- fixed lot to be shipped, independent of vessel choice",
-    min_value=1000.0, max_value=250000.0, value=float(default_cargo_qty), step=1000.0,
-)
+st.caption(f"Using the cargo quantity from the requirement above: {cargo_quantity_mt:,.0f} mt.")
 
 vessel_cost_cmp = compare_vessel_costs(port, forecast["current_rate"], cargo_quantity_mt)
-cost_rows = [{
-    "Vessel": r["vessel_class"],
-    "Feasible?": "✅ Yes" if r["feasible"] else "❌ No",
-    "Utilization": f"{r['utilization']:.0%}",
-    "Estimated cost": f"${r['estimated_cost_usd']:,.0f}",
-} for r in vessel_cost_cmp["rows"]]
-st.dataframe(pd.DataFrame(cost_rows), use_container_width=True, hide_index=True)
+feasible_rows = [r for r in vessel_cost_cmp["rows"] if r["feasible"]]
 
-if vessel_cost_cmp["cost_efficient_choice"]:
-    st.markdown(f"**Cost-efficient choice:** {vessel_cost_cmp['cost_efficient_choice']} "
-                f"(lowest estimated cost among feasible vessels; ties broken by best utilization).")
-else:
+if not feasible_rows:
     st.warning("No vessel class is fully feasible at this port for the checked constraints.")
+else:
+    bar_colors = [
+        "#2ca02c" if r["vessel_class"] == vessel_cost_cmp["cost_efficient_choice"] else "#1f77b4"
+        for r in feasible_rows
+    ]
+    bar_line_widths = [
+        3 if r["vessel_class"] == vessel_cost_cmp["cost_efficient_choice"] else 0
+        for r in feasible_rows
+    ]
+    vfig = go.Figure(go.Bar(
+        x=[r["vessel_class"] for r in feasible_rows],
+        y=[r["estimated_cost_usd"] for r in feasible_rows],
+        marker=dict(color=bar_colors, line=dict(width=bar_line_widths, color="white")),
+        customdata=[[r["utilization"]] for r in feasible_rows],
+        hovertemplate="%{x}<br>Estimated cost: $%{y:,.0f}<br>Utilization: %{customdata[0]:.0%}<extra></extra>",
+    ))
+    vfig.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10), yaxis_title="Estimated cost (USD)")
+    st.plotly_chart(vfig, use_container_width=True)
 
-st.caption("Estimated cost = (current rate + contract premium) x cargo requirement, using the same current rate and "
+    st.markdown(f"**Cost-efficient choice:** {vessel_cost_cmp['cost_efficient_choice']} "
+                f"(lowest estimated cost among feasible vessels; ties broken by best utilization) -- "
+                f"highlighted in green above.")
+
+with st.expander("Show exact vessel comparison figures"):
+    cost_rows = [{
+        "Vessel": r["vessel_class"],
+        "Feasible?": "✅ Yes" if r["feasible"] else "❌ No",
+        "Utilization": f"{r['utilization']:.0%}",
+        "Estimated cost": f"${r['estimated_cost_usd']:,.0f}",
+    } for r in vessel_cost_cmp["rows"]]
+    st.dataframe(pd.DataFrame(cost_rows), use_container_width=True, hide_index=True)
+
+st.caption("Estimated cost = (current rate + contract premium) x cargo quantity, using the same current rate and "
            "premium as the Recommendation section below -- this dataset carries one route-level spot rate, not a "
            "rate per vessel class, so $/mt cost is the same across feasible vessels here; feasibility and "
            "utilization are what actually differ between them.")
@@ -180,21 +225,33 @@ st.subheader("Risk assessment")
 risk = compute_risk(forecast["series"], congestion_level, availability_level)
 st.markdown(f"### {RISK_COLOR[risk['level']]} {risk['level']} risk  ({risk['total_score']} / {risk['max_score']})")
 
-risk_cols = st.columns(len(risk["factors"]))
-for col, factor in zip(risk_cols, risk["factors"]):
-    col.metric(factor["name"], factor["value"], help=f"Contributes {factor['score']} / {factor['max']} to the risk score.")
+rfig = go.Figure(go.Bar(
+    y=[f["name"] for f in risk["factors"]],
+    x=[f["score"] for f in risk["factors"]],
+    orientation="h",
+    marker=dict(color="#d62728"),
+    customdata=[[f["value"], f["max"]] for f in risk["factors"]],
+    hovertemplate="%{y}<br>Value: %{customdata[0]}<br>Contributes %{x} / %{customdata[1]} pts<extra></extra>",
+))
+rfig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10),
+                    xaxis=dict(title="Points contributed to risk score (of 2 max each)", range=[0, 2.5]))
+st.plotly_chart(rfig, use_container_width=True)
+
+with st.expander("Show exact risk figures"):
+    for f in risk["factors"]:
+        st.markdown(f"- **{f['name']}**: {f['value']} -- contributes {f['score']} / {f['max']} to the risk score.")
 
 # ---------------------------------------------------------------- Recommendation
 st.subheader("Recommendation")
 dwt_max = VESSEL_SPECS[vessel_class]["dwt_max"]
-rec = build_recommendation(forecast, risk, vessel_class, dwt_max)
+rec = build_recommendation(forecast, risk, vessel_class, dwt_max, cargo_quantity_mt)
 
 rcol1, rcol2 = st.columns([1, 2])
 with rcol1:
     verdict_color = "green" if rec["decision"] == "Charter Now" else "orange"
     st.markdown(f"#### :{verdict_color}[{rec['decision']}]")
     st.markdown(f"**Vessel:** {rec['vessel_class']}")
-    st.markdown(f"**Contract strategy:** {rec['contract_strategy']}")
+    st.markdown(f"**Cheapest strategy:** {rec['contract_strategy']}")
     st.markdown(f"**Risk:** {RISK_COLOR[rec['risk_level']]} {rec['risk_level']}")
 
 with rcol2:
@@ -204,11 +261,14 @@ with rcol2:
 
 costs = rec["costs"]
 ccol1, ccol2, ccol3 = st.columns(3)
-ccol1.metric("Spot-only cost (avg forecast rate x tonnage)", f"${costs['spot_cost_usd']:,.0f}")
-ccol2.metric("Fixed contract cost (current rate + premium x tonnage)", f"${costs['contract_cost_usd']:,.0f}")
-ccol3.metric("Difference (spot - contract)", f"${costs['savings_usd']:,.0f}")
-st.caption(f"Assumes {costs['tonnage_mt']:,.0f} mt cargo ({VESSEL_SPECS[vessel_class]['dwt_max']:,} DWT vessel at 90% utilization) "
-           f"and a {rec['costs']['contract_rate'] / forecast['current_rate'] - 1:.1%} contract premium over the current spot rate. Simplified for time -- see README.")
+ccol1.metric("Spot-only", f"${costs['spot_cost_usd']:,.0f}",
+             help="Average forecast rate over the horizon x cargo quantity.")
+ccol2.metric(f"Short-term ({costs['multi_voyage_count']}-voyage)", f"${costs['multi_voyage_cost_usd']:,.0f}",
+             help="Current rate + a slightly better multi-voyage premium, x cargo quantity.")
+ccol3.metric("Medium-term (single contract)", f"${costs['contract_cost_usd']:,.0f}",
+             help="Current rate + the single fixed-contract premium, x cargo quantity.")
+st.caption(f"Assumes {costs['tonnage_mt']:,.0f} mt cargo ({costs['utilization']:.0%} of the {vessel_class} vessel's "
+           f"{dwt_max:,} mt DWT capacity). Simplified for time -- see README.")
 
 # ---------------------------------------------------------------- Backtest
 st.subheader("Backtest: rule vs spot-only")
@@ -223,16 +283,46 @@ else:
         f"&nbsp; <span style='font-size:0.8em;color:gray'>(backtested/simulated estimate, {bt['n_points']} historical decision points)</span>",
         unsafe_allow_html=True,
     )
-    bt_rows = [{
-        "Decision date": p["decision_date"].date(),
-        "Decision": p["decision"],
-        "Rate at decision": f"${p['rate_at_decision']:.2f}",
-        f"Actual rate +{horizon}d": f"${p['realized_rate_after_horizon']:.2f}",
-        "Strategy rate": f"${p['strategy_rate']:.2f}",
-        "Savings/mt vs spot-only": f"${p['savings_per_mt']:.2f}",
-    } for p in bt["points"]]
-    st.dataframe(pd.DataFrame(bt_rows), use_container_width=True, hide_index=True)
-    st.caption("Each row re-runs the same forecast + risk + recommendation rule using only data available before that "
-               "date (no look-ahead). The spot-only baseline waits and pays whatever spot costs when the cargo "
+    full_series = forecast["series"]
+    bt_fig = go.Figure()
+    bt_fig.add_trace(go.Scatter(
+        x=full_series.index, y=full_series.values, name="Historical rate",
+        mode="lines", line=dict(color="#1f77b4", width=1.5), hoverinfo="skip",
+    ))
+
+    def _decision_marker_trace(points, name, color, symbol):
+        return go.Scatter(
+            x=[p["decision_date"] for p in points],
+            y=[p["rate_at_decision"] for p in points],
+            name=name, mode="markers",
+            marker=dict(color=color, size=12, symbol=symbol, line=dict(width=1, color="white")),
+            customdata=[[p["decision_date"].strftime("%Y-%m-%d"), p["rate_at_decision"], p["savings_per_mt"]]
+                        for p in points],
+            hovertemplate="Decision date: %{customdata[0]}<br>Rate at decision: $%{customdata[1]:.2f}/mt<br>"
+                           "Savings/mt vs spot-only: $%{customdata[2]:.2f}<extra></extra>",
+        )
+
+    charter_now_points = [p for p in bt["points"] if p["decision"] == "Charter Now"]
+    wait_points = [p for p in bt["points"] if p["decision"] == "Wait / Monitor"]
+    bt_fig.add_trace(_decision_marker_trace(charter_now_points, "Charter Now", "#2ca02c", "triangle-up"))
+    bt_fig.add_trace(_decision_marker_trace(wait_points, "Wait / Monitor", "#d62728", "circle"))
+
+    bt_fig.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10), yaxis_title="USD / mt",
+                          legend=dict(orientation="h", yanchor="bottom", y=1.02))
+    st.plotly_chart(bt_fig, use_container_width=True)
+
+    with st.expander("Show exact backtest figures"):
+        bt_rows = [{
+            "Decision date": p["decision_date"].date(),
+            "Decision": p["decision"],
+            "Rate at decision": f"${p['rate_at_decision']:.2f}",
+            f"Actual rate +{horizon}d": f"${p['realized_rate_after_horizon']:.2f}",
+            "Strategy rate": f"${p['strategy_rate']:.2f}",
+            "Savings/mt vs spot-only": f"${p['savings_per_mt']:.2f}",
+        } for p in bt["points"]]
+        st.dataframe(pd.DataFrame(bt_rows), use_container_width=True, hide_index=True)
+
+    st.caption("Each marker re-runs the same forecast + risk + recommendation rule using only data available before "
+               "that date (no look-ahead). The spot-only baseline waits and pays whatever spot costs when the cargo "
                "actually needs to move; a 'Charter Now' call locks a contract early instead, at a small premium. "
                "Congestion/availability inputs use today's slider values throughout history -- a simplification, see README.")
